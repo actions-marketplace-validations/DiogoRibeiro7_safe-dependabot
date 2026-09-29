@@ -372,6 +372,201 @@ def test_multi_ecosystem_group_requires_schedule() -> None:
     )
 
 
+def test_weekly_schedule_accepts_day_time_and_timezone() -> None:
+    """A fully specified weekly schedule should pass validation."""
+
+    config = safe_config()
+    config["updates"][0]["schedule"] = {
+        "interval": "weekly",
+        "day": "tuesday",
+        "time": "02:00",
+        "timezone": "Europe/Lisbon",
+    }
+
+    errors, _, _ = validator.validate(
+        config,
+        max_open_prs=5,
+        require_major_ignore=True,
+        require_github_actions=True,
+        fail_on_broad_groups=False,
+    )
+
+    assert errors == []
+
+
+def test_cron_schedule_requires_cronjob() -> None:
+    """Cron intervals must provide a cronjob expression."""
+
+    config = safe_config()
+    config["updates"][0]["schedule"] = {"interval": "cron"}
+
+    errors, _, _ = validator.validate(
+        config,
+        max_open_prs=5,
+        require_major_ignore=True,
+        require_github_actions=True,
+        fail_on_broad_groups=False,
+    )
+
+    assert any(
+        "interval 'cron' requires a non-empty cronjob" in error
+        for error in errors
+    )
+
+
+def test_valid_cron_schedule_passes() -> None:
+    """A cron interval with an expression should pass."""
+
+    config = safe_config()
+    config["updates"][0]["schedule"] = {
+        "interval": "cron",
+        "cronjob": "0 9 * * *",
+    }
+
+    errors, _, _ = validator.validate(
+        config,
+        max_open_prs=5,
+        require_major_ignore=True,
+        require_github_actions=True,
+        fail_on_broad_groups=False,
+    )
+
+    assert errors == []
+
+
+def test_cronjob_is_rejected_for_non_cron_interval() -> None:
+    """A cronjob field should not silently apply to weekly schedules."""
+
+    config = safe_config()
+    config["updates"][0]["schedule"] = {
+        "interval": "weekly",
+        "cronjob": "0 9 * * *",
+    }
+
+    errors, _, _ = validator.validate(
+        config,
+        max_open_prs=5,
+        require_major_ignore=True,
+        require_github_actions=True,
+        fail_on_broad_groups=False,
+    )
+
+    assert any(
+        "cronjob is only valid with interval 'cron'" in error
+        for error in errors
+    )
+
+
+def test_day_is_rejected_for_non_weekly_interval() -> None:
+    """The day field is only meaningful for weekly schedules."""
+
+    config = safe_config()
+    config["updates"][0]["schedule"] = {
+        "interval": "daily",
+        "day": "monday",
+    }
+
+    errors, _, _ = validator.validate(
+        config,
+        max_open_prs=5,
+        require_major_ignore=True,
+        require_github_actions=True,
+        fail_on_broad_groups=False,
+    )
+
+    assert any(
+        "day is only valid with interval 'weekly'" in error
+        for error in errors
+    )
+
+
+def test_schedule_time_uses_24_hour_hh_mm() -> None:
+    """Invalid schedule clock values should fail."""
+
+    config = safe_config()
+    config["updates"][0]["schedule"] = {
+        "interval": "weekly",
+        "time": "24:00",
+    }
+
+    errors, _, _ = validator.validate(
+        config,
+        max_open_prs=5,
+        require_major_ignore=True,
+        require_github_actions=True,
+        fail_on_broad_groups=False,
+    )
+
+    assert any("24-hour HH:MM format" in error for error in errors)
+
+
+def test_schedule_timezone_must_be_known_iana_zone() -> None:
+    """Unknown timezone identifiers should fail."""
+
+    config = safe_config()
+    config["updates"][0]["schedule"] = {
+        "interval": "weekly",
+        "time": "09:00",
+        "timezone": "Mars/Olympus",
+    }
+
+    errors, _, _ = validator.validate(
+        config,
+        max_open_prs=5,
+        require_major_ignore=True,
+        require_github_actions=True,
+        fail_on_broad_groups=False,
+    )
+
+    assert any("is not a known IANA timezone" in error for error in errors)
+
+
+def test_schedule_timezone_requires_time() -> None:
+    """Timezone without a time value is not a meaningful schedule."""
+
+    config = safe_config()
+    config["updates"][0]["schedule"] = {
+        "interval": "weekly",
+        "timezone": "UTC",
+    }
+
+    errors, _, _ = validator.validate(
+        config,
+        max_open_prs=5,
+        require_major_ignore=True,
+        require_github_actions=True,
+        fail_on_broad_groups=False,
+    )
+
+    assert any("timezone requires schedule time" in error for error in errors)
+
+
+def test_multi_ecosystem_group_uses_same_cron_validation() -> None:
+    """Top-level multi-ecosystem group schedules should share validation."""
+
+    config = safe_config()
+    config["multi-ecosystem-groups"] = {
+        "runtime": {"schedule": {"interval": "cron"}}
+    }
+    config["updates"][0].pop("schedule")
+    config["updates"][0]["multi-ecosystem-group"] = "runtime"
+    config["updates"][0]["patterns"] = ["*"]
+
+    errors, _, _ = validator.validate(
+        config,
+        max_open_prs=5,
+        require_major_ignore=True,
+        require_github_actions=True,
+        fail_on_broad_groups=False,
+    )
+
+    assert any(
+        "multi-ecosystem-groups.runtime schedule interval 'cron' "
+        "requires a non-empty cronjob" in error
+        for error in errors
+    )
+
+
 def test_multi_ecosystem_group_schedule_interval_is_validated() -> None:
     """Top-level group schedules should use supported intervals."""
 
@@ -575,7 +770,145 @@ def test_broad_groups_warn_by_default() -> None:
     )
 
     assert errors == []
-    assert any("matches all dependencies" in warning for warning in warnings)
+    assert any("matches all dependency names" in warning for warning in warnings)
+
+
+def test_wildcard_group_with_exclusions_is_not_broad() -> None:
+    """Exclude patterns materially narrow a wildcard group."""
+
+    config = safe_config()
+    config["updates"][0]["groups"] = {
+        "safe": {
+            "patterns": ["*"],
+            "exclude-patterns": ["django"],
+        }
+    }
+
+    errors, warnings, _ = validator.validate(
+        config,
+        max_open_prs=5,
+        require_major_ignore=True,
+        require_github_actions=True,
+        fail_on_broad_groups=False,
+    )
+
+    assert errors == []
+    assert not any("matches all dependency names" in warning for warning in warnings)
+
+
+def test_wildcard_group_with_dependency_type_is_not_broad() -> None:
+    """Development-only wildcard groups should not be called fully broad."""
+
+    config = safe_config()
+    config["updates"][0]["groups"] = {
+        "dev": {
+            "patterns": ["*"],
+            "dependency-type": "development",
+        }
+    }
+
+    errors, warnings, _ = validator.validate(
+        config,
+        max_open_prs=5,
+        require_major_ignore=True,
+        require_github_actions=True,
+        fail_on_broad_groups=False,
+    )
+
+    assert errors == []
+    assert not any("matches all dependency names" in warning for warning in warnings)
+
+
+def test_wildcard_group_with_update_types_is_not_broad() -> None:
+    """Patch/minor-only wildcard groups are meaningfully constrained."""
+
+    config = safe_config()
+    config["updates"][0]["groups"] = {
+        "safe": {
+            "patterns": ["*"],
+            "update-types": ["minor", "patch"],
+        }
+    }
+
+    errors, warnings, _ = validator.validate(
+        config,
+        max_open_prs=5,
+        require_major_ignore=True,
+        require_github_actions=True,
+        fail_on_broad_groups=False,
+    )
+
+    assert errors == []
+    assert not any("matches all dependency names" in warning for warning in warnings)
+
+
+def test_wildcard_security_update_group_is_not_broad() -> None:
+    """Security-only wildcard groups should not trigger the broad warning."""
+
+    config = safe_config()
+    config["updates"][0]["groups"] = {
+        "security": {
+            "patterns": ["*"],
+            "applies-to": "security-updates",
+        }
+    }
+
+    errors, warnings, _ = validator.validate(
+        config,
+        max_open_prs=5,
+        require_major_ignore=True,
+        require_github_actions=True,
+        fail_on_broad_groups=False,
+    )
+
+    assert errors == []
+    assert not any("matches all dependency names" in warning for warning in warnings)
+
+
+def test_explicit_version_scope_remains_broad_without_other_constraints() -> None:
+    """Explicit version-updates is equivalent to the default broad scope."""
+
+    config = safe_config()
+    config["updates"][0]["groups"] = {
+        "everything": {
+            "patterns": ["*"],
+            "applies-to": "version-updates",
+        }
+    }
+
+    errors, warnings, _ = validator.validate(
+        config,
+        max_open_prs=5,
+        require_major_ignore=True,
+        require_github_actions=True,
+        fail_on_broad_groups=False,
+    )
+
+    assert errors == []
+    assert any("matches all dependency names" in warning for warning in warnings)
+
+
+def test_all_semver_update_types_remain_broad() -> None:
+    """Listing every SemVer level should not disguise an unconstrained group."""
+
+    config = safe_config()
+    config["updates"][0]["groups"] = {
+        "everything": {
+            "patterns": ["*"],
+            "update-types": ["major", "minor", "patch"],
+        }
+    }
+
+    errors, warnings, _ = validator.validate(
+        config,
+        max_open_prs=5,
+        require_major_ignore=True,
+        require_github_actions=True,
+        fail_on_broad_groups=False,
+    )
+
+    assert errors == []
+    assert any("matches all dependency names" in warning for warning in warnings)
 
 
 def test_broad_groups_can_be_made_fatal() -> None:
@@ -594,7 +927,7 @@ def test_broad_groups_can_be_made_fatal() -> None:
         fail_on_broad_groups=True,
     )
 
-    assert any("matches all dependencies" in error for error in errors)
+    assert any("matches all dependency names" in error for error in errors)
 
 
 def test_github_actions_block_can_be_required() -> None:

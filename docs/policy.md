@@ -43,16 +43,25 @@ Multi-ecosystem groups are treated separately: GitHub consolidates a group into 
 
 ## Broad groups
 
-A group with:
+A completely unconstrained wildcard group can make a failed CI run harder to diagnose because many unrelated dependency changes arrive together:
 
 ```yaml
-patterns:
-  - "*"
+groups:
+  everything:
+    patterns:
+      - "*"
 ```
 
-can make a failed CI run harder to diagnose because several dependency changes arrive together.
+Safe Dependabot only treats that group as broad when the wildcard is not meaningfully narrowed. The warning is suppressed when the group uses:
 
-By default this generates a warning. To fail the policy check instead:
+- non-empty `exclude-patterns`;
+- a specific `dependency-type`;
+- a proper subset of SemVer `update-types`;
+- `applies-to: security-updates`.
+
+An explicit `applies-to: version-updates` does not narrow the group because version updates are Dependabot's default group scope. Likewise, listing all three SemVer levels (`major`, `minor`, and `patch`) remains effectively unconstrained.
+
+By default an unconstrained wildcard generates a warning. To fail the policy check instead:
 
 ```yaml
 - uses: DiogoRibeiro7/safe-dependabot@v1
@@ -67,3 +76,10 @@ With `require-github-actions: true`, Safe Dependabot requires a `github-actions`
 ## Security updates
 
 Safe Dependabot validates configuration. It does not approve, merge, or suppress security updates, and it does not replace Dependabot alerts or dependency review.
+
+
+## Schedule semantics
+
+Safe Dependabot validates the combinations of schedule fields that materially affect Dependabot behavior. In particular, cron schedules must provide `cronjob`, weekly `day` values are checked explicitly, clock times use 24-hour `HH:MM`, and timezone identifiers are validated against the IANA timezone database.
+
+The same validation is used for standalone update schedules and top-level multi-ecosystem group schedules.

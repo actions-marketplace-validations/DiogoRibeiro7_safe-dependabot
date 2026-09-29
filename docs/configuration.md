@@ -109,3 +109,36 @@ pip, pre-commit, pub, rust-toolchain, sbt, swift, terraform, uv, vcpkg
 ```
 
 This is intentionally a lightweight schema layer rather than a replacement for Dependabot Core's complete configuration parser.
+
+
+## Schedule validation
+
+Safe Dependabot validates schedule semantics for both ordinary update blocks and multi-ecosystem groups.
+
+Supported intervals are `daily`, `weekly`, `monthly`, `quarterly`, `semiannually`, `yearly`, and `cron`.
+
+Additional checks include:
+
+- `day` must be a lowercase weekday and is only valid with `weekly`;
+- `time` must use 24-hour `HH:MM` format;
+- `timezone` must be a known IANA timezone and requires `time`;
+- `cron` requires a non-empty `cronjob`;
+- `cronjob` is rejected for non-`cron` intervals.
+
+Example:
+
+```yaml
+schedule:
+  interval: weekly
+  day: tuesday
+  time: "02:00"
+  timezone: Europe/Lisbon
+```
+
+Cron example:
+
+```yaml
+schedule:
+  interval: cron
+  cronjob: "0 9 * * *"
+```
