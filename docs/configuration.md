@@ -12,6 +12,9 @@ Safe Dependabot exposes a small set of inputs so repositories can tighten or rel
 | `require-github-actions` | `true` | Require a `github-actions` update block. |
 | `fail-on-broad-groups` | `false` | Treat groups matching every dependency as errors instead of warnings. |
 | `detect-ecosystems` | `true` | Detect manifests and require matching Dependabot ecosystems. |
+| `detection-ignore-paths` | empty | Newline-separated repository-relative globs excluded from detection. |
+| `detection-overrides` | empty | Newline-separated `glob=ecosystem` rules overriding automatic classification. |
+| `include-ignored-directories` | `false` | Scan normally ignored build/vendor/cache directory names; `.git` always remains excluded. |
 
 ## Outputs
 
@@ -19,6 +22,10 @@ Safe Dependabot exposes a small set of inputs so repositories can tighten or rel
 | --- | --- |
 | `update-blocks` | Number of Dependabot update blocks validated. |
 | `detected-ecosystems` | Comma-separated ecosystems detected from repository manifests. |
+| `detection-excluded-count` | Number of manifests excluded by detector path rules. |
+| `detection-overridden-count` | Number of manifests reclassified by detector overrides. |
+| `excluded-manifests` | Comma-separated excluded repository-relative paths. |
+| `overridden-manifests` | Comma-separated applied `path=ecosystem` overrides. |
 
 ## Example
 
@@ -36,9 +43,47 @@ Safe Dependabot exposes a small set of inputs so repositories can tighten or rel
   run: echo "${{ steps.dependabot-policy.outputs.detected-ecosystems }}"
 ```
 
+## Targeted ecosystem detection controls
+
+Prefer targeted controls over disabling ecosystem detection for the whole repository.
+
+Ignore generated fixtures or archived manifests with repository-relative globs:
+
+```yaml
+- uses: DiogoRibeiro7/safe-dependabot@v1
+  with:
+    detection-ignore-paths: |
+      fixtures/**
+      archived/**/package.json
+```
+
+Override ambiguous or intentionally non-standard manifests:
+
+```yaml
+- uses: DiogoRibeiro7/safe-dependabot@v1
+  with:
+    detection-overrides: |
+      infra/**/*.tf=opentofu
+      legacy/package.json=npm
+```
+
+The first matching override wins. Override ecosystem values are validated against the same supported-ecosystem set as `package-ecosystem`.
+
+By default, generated/environment directory names such as `build`, `dist`, `vendor`, `target`, and virtual environments are pruned. Re-enable scanning of those names when they contain legitimate projects:
+
+```yaml
+- uses: DiogoRibeiro7/safe-dependabot@v1
+  with:
+    include-ignored-directories: true
+```
+
+The repository metadata directory `.git` is always excluded.
+
+The action reports how many manifests were excluded or overridden and emits the adjusted paths through outputs.
+
 ## Disabling ecosystem detection
 
-For unusual monorepos or generated manifests, automatic detection can be disabled:
+If targeted controls are not sufficient, automatic detection can still be disabled:
 
 ```yaml
 - uses: DiogoRibeiro7/safe-dependabot@v1

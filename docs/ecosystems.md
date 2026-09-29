@@ -106,3 +106,14 @@ updates:
 Safe Dependabot treats `directory` as one exact manifest location and supports globbing only for `directories`, matching GitHub's configuration semantics. It also scopes coverage by `target-branch` when the checked-out branch and repository default branch are available from the GitHub Actions event.
 
 If multiple blocks for the same ecosystem and effective target branch cover the same detected manifest directory, validation fails because GitHub requires those locations to be unique and non-overlapping.
+
+
+## Detector exclusions and overrides
+
+Automatic detection can be customized without disabling it globally.
+
+`detection-ignore-paths` accepts newline-separated repository-relative globs and removes matching files before classification. `detection-overrides` accepts newline-separated `glob=ecosystem` rules and replaces automatic classification for matching paths. The first matching override wins.
+
+These controls are useful for generated fixtures, archived subprojects, exported manifests, or intentionally ambiguous layouts. Applied exclusions and overrides are reported in action outputs and printed in the workflow log.
+
+Normally ignored generated/environment directory names can be scanned with `include-ignored-directories: true`. This affects names such as `build`, `dist`, `vendor`, `target`, and virtual environments. `.git` remains excluded even in inclusive mode.

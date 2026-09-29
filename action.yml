@@ -30,12 +30,32 @@ inputs:
     description: "Detect dependency manifests and require matching Dependabot ecosystem and directory coverage."
     required: false
     default: "true"
+  detection-ignore-paths:
+    description: "Newline-separated repository-relative globs to exclude from ecosystem detection."
+    required: false
+    default: ""
+  detection-overrides:
+    description: "Newline-separated glob=ecosystem rules that override automatic manifest classification."
+    required: false
+    default: ""
+  include-ignored-directories:
+    description: "Scan normally ignored build/vendor/cache directory names; .git always remains excluded."
+    required: false
+    default: "false"
 
 outputs:
   update-blocks:
     description: "Number of Dependabot update blocks validated."
   detected-ecosystems:
     description: "Comma-separated Dependabot ecosystems detected from repository manifests."
+  detection-excluded-count:
+    description: "Number of manifests excluded by detection-ignore-paths."
+  detection-overridden-count:
+    description: "Number of manifests reclassified by detection-overrides."
+  excluded-manifests:
+    description: "Comma-separated repository-relative manifest paths excluded from detection."
+  overridden-manifests:
+    description: "Comma-separated path=ecosystem detector overrides that were applied."
 
 runs:
   using: "docker"
@@ -53,3 +73,9 @@ runs:
     - "${{ inputs.fail-on-broad-groups }}"
     - "--detect-ecosystems"
     - "${{ inputs.detect-ecosystems }}"
+    - "--detection-ignore-paths"
+    - "${{ inputs.detection-ignore-paths }}"
+    - "--detection-overrides"
+    - "${{ inputs.detection-overrides }}"
+    - "--include-ignored-directories"
+    - "${{ inputs.include-ignored-directories }}"

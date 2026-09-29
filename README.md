@@ -50,6 +50,9 @@ jobs:
     require-github-actions: true
     fail-on-broad-groups: false
     detect-ecosystems: true
+    detection-ignore-paths: ""
+    detection-overrides: ""
+    include-ignored-directories: false
 ```
 
 | Input | Default | Purpose |
@@ -60,6 +63,9 @@ jobs:
 | `require-github-actions` | `true` | Require Dependabot coverage for GitHub Actions |
 | `fail-on-broad-groups` | `false` | Turn wildcard dependency-group warnings into failures |
 | `detect-ecosystems` | `true` | Detect repository manifests and require matching ecosystem and directory/directories coverage |
+| `detection-ignore-paths` | empty | Exclude selected repository-relative detector paths/globs |
+| `detection-overrides` | empty | Reclassify selected paths with `glob=ecosystem` rules |
+| `include-ignored-directories` | `false` | Scan normally ignored build/vendor/cache directory names |
 
 The action exposes `update-blocks`, the number of Dependabot update blocks that were validated, and `detected-ecosystems`, a comma-separated list of ecosystems found from repository manifests.
 

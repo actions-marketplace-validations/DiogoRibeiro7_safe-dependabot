@@ -1013,6 +1013,118 @@ def test_every_supported_ecosystem_has_a_detection_fixture(tmp_path: Path) -> No
     assert set(detected) == set(validator.SUPPORTED_ECOSYSTEMS)
 
 
+def test_detection_ignore_glob_excludes_one_manifest(tmp_path: Path) -> None:
+    """One generated manifest can be ignored without disabling detection."""
+
+    generated = tmp_path / "fixtures" / "package.json"
+    generated.parent.mkdir(parents=True)
+    generated.write_text('{"name":"fixture"}', encoding="utf-8")
+
+    real = tmp_path / "Cargo.toml"
+    real.write_text(
+        "[package]\nname='demo'\nversion='0.1.0'\n",
+        encoding="utf-8",
+    )
+
+    detected, excluded, overridden = validator.detect_ecosystems_with_report(
+        tmp_path,
+        ignore_paths=["fixtures/**"],
+    )
+
+    assert detected == {"cargo": ["Cargo.toml"]}
+    assert excluded == ["fixtures/package.json"]
+    assert overridden == []
+
+
+def test_detection_override_reclassifies_ambiguous_manifest(tmp_path: Path) -> None:
+    """A path override should replace automatic ecosystem classification."""
+
+    path = tmp_path / "infra" / "main.tf"
+    path.parent.mkdir(parents=True)
+    path.write_text("terraform {}\n", encoding="utf-8")
+
+    detected, excluded, overridden = validator.detect_ecosystems_with_report(
+        tmp_path,
+        overrides=[("infra/*.tf", "opentofu")],
+    )
+
+    assert detected == {"opentofu": ["infra/main.tf"]}
+    assert excluded == []
+    assert overridden == ["infra/main.tf=opentofu"]
+
+
+def test_detection_override_parser_rejects_unknown_ecosystem() -> None:
+    """Overrides should use the same supported ecosystem source of truth."""
+
+    try:
+        validator.parse_detection_overrides("infra/*.tf=terrform")
+    except validator.PolicyError as exc:
+        assert "unsupported ecosystem 'terrform'" in str(exc)
+    else:
+        raise AssertionError("Expected invalid ecosystem override to fail")
+
+
+def test_detection_override_parser_requires_assignment() -> None:
+    """Override syntax should fail fast when the ecosystem is missing."""
+
+    try:
+        validator.parse_detection_overrides("infra/*.tf")
+    except validator.PolicyError as exc:
+        assert "glob=ecosystem syntax" in str(exc)
+    else:
+        raise AssertionError("Expected malformed override to fail")
+
+
+def test_normally_ignored_directory_can_be_included(tmp_path: Path) -> None:
+    """Legitimate projects under build/vendor names can opt into scanning."""
+
+    manifest = tmp_path / "build" / "Cargo.toml"
+    manifest.parent.mkdir()
+    manifest.write_text(
+        "[package]\nname='demo'\nversion='0.1.0'\n",
+        encoding="utf-8",
+    )
+
+    default_detected = validator.detect_ecosystems(tmp_path)
+    inclusive_detected = validator.detect_ecosystems(
+        tmp_path,
+        include_ignored_directories=True,
+    )
+
+    assert default_detected == {}
+    assert inclusive_detected == {"cargo": ["build/Cargo.toml"]}
+
+
+def test_git_directory_remains_ignored_when_inclusion_is_enabled(
+    tmp_path: Path,
+) -> None:
+    """The repository metadata directory should never become detector input."""
+
+    manifest = tmp_path / ".git" / "package.json"
+    manifest.parent.mkdir()
+    manifest.write_text('{"name":"not-a-project"}', encoding="utf-8")
+
+    detected = validator.detect_ecosystems(
+        tmp_path,
+        include_ignored_directories=True,
+    )
+
+    assert detected == {}
+
+
+def test_repository_path_glob_supports_recursive_matches() -> None:
+    """Detector ignore/override globs should support recursive repository paths."""
+
+    assert validator.repository_path_matches(
+        "fixtures/**/package.json",
+        "fixtures/npm/v1/package.json",
+    )
+    assert not validator.repository_path_matches(
+        "fixtures/**/package.json",
+        "src/package.json",
+    )
+
+
 def test_github_actions_workflow_maps_to_repository_root() -> None:
     """GitHub Actions workflows are configured with directory /."""
 

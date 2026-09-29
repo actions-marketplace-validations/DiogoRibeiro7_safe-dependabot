@@ -90,8 +90,8 @@ ALLOWED_INTERVALS: Final[set[str]] = {
     "yearly",
     "cron",
 }
+ALWAYS_IGNORED_DIRECTORIES: Final[set[str]] = {".git"}
 IGNORED_DIRECTORIES: Final[set[str]] = {
-    ".git",
     ".mypy_cache",
     ".nox",
     ".pytest_cache",
@@ -356,26 +356,145 @@ def manifest_ecosystem(path: Path, root: Path | None = None) -> str | None:
     return None
 
 
-def detect_ecosystems(root: Path) -> dict[str, list[str]]:
-    """Detect Dependabot ecosystems represented by repository manifests."""
+def parse_detection_patterns(value: str) -> list[str]:
+    """Parse newline-separated repository-relative glob patterns."""
+
+    return [
+        line.strip().replace("\\", "/").lstrip("/")
+        for line in value.splitlines()
+        if line.strip()
+    ]
+
+
+def parse_detection_overrides(value: str) -> list[tuple[str, str]]:
+    """Parse newline-separated glob=ecosystem detector overrides."""
+
+    overrides: list[tuple[str, str]] = []
+    for line_number, line in enumerate(value.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        if "=" not in stripped:
+            raise PolicyError(
+                "Detection override line "
+                f"{line_number} must use glob=ecosystem syntax."
+            )
+
+        pattern, ecosystem = stripped.split("=", 1)
+        normalized_pattern = pattern.strip().replace("\\", "/").lstrip("/")
+        normalized_ecosystem = ecosystem.strip()
+
+        if not normalized_pattern:
+            raise PolicyError(
+                f"Detection override line {line_number} has an empty glob."
+            )
+        if normalized_ecosystem not in SUPPORTED_ECOSYSTEMS:
+            raise PolicyError(
+                f"Detection override line {line_number} uses unsupported "
+                f"ecosystem {normalized_ecosystem!r}."
+            )
+
+        overrides.append((normalized_pattern, normalized_ecosystem))
+
+    return overrides
+
+
+def repository_path_matches(pattern: str, relative_path: str) -> bool:
+    """Match a repository-relative glob against a repository-relative path."""
+
+    normalized_pattern = pattern.strip().replace("\\", "/").lstrip("/")
+    normalized_path = relative_path.strip().replace("\\", "/").lstrip("/")
+
+    if normalized_pattern in {"**", "**/*"}:
+        return True
+
+    pattern_segments = tuple(
+        segment for segment in normalized_pattern.split("/") if segment
+    )
+    path_segments = tuple(
+        segment for segment in normalized_path.split("/") if segment
+    )
+    return _match_directory_segments(pattern_segments, path_segments)
+
+
+def matching_override(
+    overrides: list[tuple[str, str]],
+    relative_path: str,
+) -> str | None:
+    """Return the first ecosystem override matching a repository-relative path."""
+
+    for pattern, ecosystem in overrides:
+        if repository_path_matches(pattern, relative_path):
+            return ecosystem
+    return None
+
+
+def detect_ecosystems_with_report(
+    root: Path,
+    *,
+    ignore_paths: list[str] | None = None,
+    overrides: list[tuple[str, str]] | None = None,
+    include_ignored_directories: bool = False,
+) -> tuple[dict[str, list[str]], list[str], list[str]]:
+    """Detect ecosystems plus excluded and overridden manifest diagnostics."""
 
     detected: dict[str, list[str]] = {}
+    excluded: list[str] = []
+    overridden: list[str] = []
+    ignore_patterns = ignore_paths or []
+    override_rules = overrides or []
+
+    ignored_directories = set(ALWAYS_IGNORED_DIRECTORIES)
+    if not include_ignored_directories:
+        ignored_directories.update(IGNORED_DIRECTORIES)
 
     for directory, dir_names, file_names in os.walk(root):
         dir_names[:] = sorted(
-            name for name in dir_names if name not in IGNORED_DIRECTORIES
+            name for name in dir_names if name not in ignored_directories
         )
         directory_path = Path(directory)
 
         for file_name in sorted(file_names):
             path = directory_path / file_name
-            ecosystem = manifest_ecosystem(path, root)
+            relative_path = path.relative_to(root).as_posix()
+
+            if any(
+                repository_path_matches(pattern, relative_path)
+                for pattern in ignore_patterns
+            ):
+                excluded.append(relative_path)
+                continue
+
+            ecosystem = matching_override(override_rules, relative_path)
+            if ecosystem is not None:
+                overridden.append(f"{relative_path}={ecosystem}")
+            else:
+                ecosystem = manifest_ecosystem(path, root)
+
             if ecosystem is None:
                 continue
 
-            relative_path = path.relative_to(root).as_posix()
             detected.setdefault(ecosystem, []).append(relative_path)
 
+    return detected, excluded, overridden
+
+
+def detect_ecosystems(
+    root: Path,
+    *,
+    ignore_paths: list[str] | None = None,
+    overrides: list[tuple[str, str]] | None = None,
+    include_ignored_directories: bool = False,
+) -> dict[str, list[str]]:
+    """Detect Dependabot ecosystems represented by repository manifests."""
+
+    detected, _, _ = detect_ecosystems_with_report(
+        root,
+        ignore_paths=ignore_paths,
+        overrides=overrides,
+        include_ignored_directories=include_ignored_directories,
+    )
     return detected
 
 
@@ -1248,6 +1367,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--require-github-actions", default="true")
     parser.add_argument("--fail-on-broad-groups", default="false")
     parser.add_argument("--detect-ecosystems", default="true")
+    parser.add_argument("--detection-ignore-paths", default="")
+    parser.add_argument("--detection-overrides", default="")
+    parser.add_argument("--include-ignored-directories", default="false")
     return parser
 
 
@@ -1266,7 +1388,26 @@ def main() -> int:
             config_path = root / config_path
 
         should_detect = parse_bool(args.detect_ecosystems)
-        detected = detect_ecosystems(root) if should_detect else None
+        excluded_manifests: list[str] = []
+        overridden_manifests: list[str] = []
+
+        if should_detect:
+            detected, excluded_manifests, overridden_manifests = (
+                detect_ecosystems_with_report(
+                    root,
+                    ignore_paths=parse_detection_patterns(
+                        args.detection_ignore_paths
+                    ),
+                    overrides=parse_detection_overrides(
+                        args.detection_overrides
+                    ),
+                    include_ignored_directories=parse_bool(
+                        args.include_ignored_directories
+                    ),
+                )
+            )
+        else:
+            detected = None
 
         config = load_config(config_path)
         errors, warnings, block_count = validate(
@@ -1291,6 +1432,21 @@ def main() -> int:
     detected_names = sorted(detected) if detected is not None else []
     set_output("update-blocks", str(block_count))
     set_output("detected-ecosystems", ",".join(detected_names))
+    set_output("detection-excluded-count", str(len(excluded_manifests)))
+    set_output("detection-overridden-count", str(len(overridden_manifests)))
+    set_output("excluded-manifests", ",".join(excluded_manifests))
+    set_output("overridden-manifests", ",".join(overridden_manifests))
+
+    if excluded_manifests:
+        print(
+            "safe-dependabot: detector exclusions: "
+            + ", ".join(excluded_manifests)
+        )
+    if overridden_manifests:
+        print(
+            "safe-dependabot: detector overrides: "
+            + ", ".join(overridden_manifests)
+        )
 
     if errors:
         print(f"safe-dependabot: failed with {len(errors)} policy error(s).")
