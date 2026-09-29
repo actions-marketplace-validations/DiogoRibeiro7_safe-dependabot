@@ -6,7 +6,7 @@ Full documentation: https://diogoribeiro7.github.io/safe-dependabot/
 
 The default policy is intentionally simple:
 
-- require Dependabot configuration version 2;
+- require Dependabot configuration version 2 and validate core configuration structure;
 - require a GitHub Actions update block;
 - require routine semantic-versioning major version updates to be blocked without suppressing security remediation;
 - allow at most five open Dependabot pull requests per update block;

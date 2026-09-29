@@ -65,6 +65,170 @@ def safe_config() -> dict[str, Any]:
     }
 
 
+def test_unknown_package_ecosystem_fails_structure_validation() -> None:
+    """Typos in package-ecosystem should fail before policy evaluation."""
+
+    config = safe_config()
+    config["updates"][0]["package-ecosystem"] = "pyhton"
+
+    errors, _, _ = validator.validate(
+        config,
+        max_open_prs=5,
+        require_major_ignore=True,
+        require_github_actions=True,
+        fail_on_broad_groups=False,
+    )
+
+    assert any("unsupported package-ecosystem 'pyhton'" in error for error in errors)
+
+
+def test_directory_and_directories_are_mutually_exclusive() -> None:
+    """An update block should choose exactly one location form."""
+
+    config = safe_config()
+    config["updates"][0]["directories"] = ["/", "/examples"]
+
+    errors, _, _ = validator.validate(
+        config,
+        max_open_prs=5,
+        require_major_ignore=True,
+        require_github_actions=True,
+        fail_on_broad_groups=False,
+    )
+
+    assert any("either directory or directories, not both" in error for error in errors)
+
+
+def test_directory_must_be_non_empty_string() -> None:
+    """A malformed single directory should fail structural validation."""
+
+    config = safe_config()
+    config["updates"][0]["directory"] = ""
+
+    errors, _, _ = validator.validate(
+        config,
+        max_open_prs=5,
+        require_major_ignore=True,
+        require_github_actions=True,
+        fail_on_broad_groups=False,
+    )
+
+    assert any("directory must be a non-empty string" in error for error in errors)
+
+
+def test_directories_must_be_non_empty_string_list() -> None:
+    """Every directories entry should be a non-empty string."""
+
+    config = safe_config()
+    config["updates"][0].pop("directory")
+    config["updates"][0]["directories"] = ["/apps/api", ""]
+
+    errors, _, _ = validator.validate(
+        config,
+        max_open_prs=5,
+        require_major_ignore=True,
+        require_github_actions=True,
+        fail_on_broad_groups=False,
+    )
+
+    assert any("directories[2] must be a non-empty string" in error for error in errors)
+
+
+def test_directory_does_not_accept_globs() -> None:
+    """Globbing belongs to directories, not directory."""
+
+    config = safe_config()
+    config["updates"][0]["directory"] = "/apps/*"
+
+    errors, _, _ = validator.validate(
+        config,
+        max_open_prs=5,
+        require_major_ignore=True,
+        require_github_actions=True,
+        fail_on_broad_groups=False,
+    )
+
+    assert any("directory does not support globbing" in error for error in errors)
+
+
+def test_github_actions_requires_root_directory() -> None:
+    """GitHub Actions Dependabot updates are configured from repository root."""
+
+    config = safe_config()
+    config["updates"][1]["directory"] = "/.github/workflows"
+
+    errors, _, _ = validator.validate(
+        config,
+        max_open_prs=5,
+        require_major_ignore=True,
+        require_github_actions=True,
+        fail_on_broad_groups=False,
+    )
+
+    assert any(
+        "(github-actions) must use / as its manifest directory" in error
+        for error in errors
+    )
+
+
+def test_invalid_dependency_group_identifier_fails() -> None:
+    """Ordinary dependency groups should follow GitHub's identifier rules."""
+
+    config = safe_config()
+    config["updates"][0]["groups"] = {
+        "123-invalid": {"patterns": ["*"]},
+    }
+
+    errors, _, _ = validator.validate(
+        config,
+        max_open_prs=5,
+        require_major_ignore=True,
+        require_github_actions=True,
+        fail_on_broad_groups=False,
+    )
+
+    assert any("has an invalid identifier" in error for error in errors)
+
+
+def test_dependency_groups_must_be_mapping() -> None:
+    """The groups option should reject unsupported container types."""
+
+    config = safe_config()
+    config["updates"][0]["groups"] = ["everything"]
+
+    errors, _, _ = validator.validate(
+        config,
+        max_open_prs=5,
+        require_major_ignore=True,
+        require_github_actions=True,
+        fail_on_broad_groups=False,
+    )
+
+    assert any("groups must be a mapping" in error for error in errors)
+
+
+def test_group_update_types_validate_supported_values() -> None:
+    """Group update-types should use Dependabot's major/minor/patch values."""
+
+    config = safe_config()
+    config["updates"][0]["groups"] = {
+        "safe-updates": {
+            "patterns": ["*"],
+            "update-types": ["semver-minor"],
+        }
+    }
+
+    errors, _, _ = validator.validate(
+        config,
+        max_open_prs=5,
+        require_major_ignore=True,
+        require_github_actions=True,
+        fail_on_broad_groups=False,
+    )
+
+    assert any("containing only major, minor, or patch" in error for error in errors)
+
+
 def test_safe_configuration_passes() -> None:
     """A conservative configuration should pass without warnings."""
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
@@ -16,6 +17,55 @@ PATCH_UPDATE: Final[str] = "version-update:semver-patch"
 MINOR_UPDATE: Final[str] = "version-update:semver-minor"
 MAJOR_UPDATE: Final[str] = "version-update:semver-major"
 DEFAULT_OPEN_PULL_REQUESTS_LIMIT: Final[int] = 5
+SUPPORTED_ECOSYSTEMS: Final[frozenset[str]] = frozenset(
+    {
+        "bazel",
+        "bun",
+        "bundler",
+        "cargo",
+        "composer",
+        "conda",
+        "deno",
+        "devcontainers",
+        "docker",
+        "docker-compose",
+        "dotnet-sdk",
+        "elm",
+        "gitsubmodule",
+        "github-actions",
+        "gomod",
+        "gradle",
+        "helm",
+        "julia",
+        "maven",
+        "mix",
+        "nix",
+        "npm",
+        "nuget",
+        "opentofu",
+        "pip",
+        "pre-commit",
+        "pub",
+        "rust-toolchain",
+        "sbt",
+        "swift",
+        "terraform",
+        "uv",
+        "vcpkg",
+    }
+)
+GROUP_IDENTIFIER_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^[A-Za-z](?:[A-Za-z|_-]*[A-Za-z])?$"
+)
+ALLOWED_GROUP_APPLIES_TO: Final[frozenset[str]] = frozenset(
+    {"version-updates", "security-updates"}
+)
+ALLOWED_GROUP_DEPENDENCY_TYPES: Final[frozenset[str]] = frozenset(
+    {"development", "production"}
+)
+ALLOWED_GROUP_UPDATE_TYPES: Final[frozenset[str]] = frozenset(
+    {"major", "minor", "patch"}
+)
 ALLOWED_INTERVALS: Final[set[str]] = {
     "daily",
     "weekly",
@@ -266,6 +316,169 @@ def has_legacy_major_ignore(update: dict[str, Any]) -> bool:
         ):
             return True
     return False
+
+
+def validate_location_structure(
+    update: dict[str, Any],
+    *,
+    label: str,
+    ecosystem: str,
+) -> list[str]:
+    """Validate directory/directories structure for one update block."""
+
+    errors: list[str] = []
+    has_directory = "directory" in update
+    has_directories = "directories" in update
+
+    if has_directory and has_directories:
+        errors.append(
+            f"{label} ({ecosystem}) must use either directory or directories, "
+            "not both."
+        )
+        return errors
+
+    if not has_directory and not has_directories:
+        errors.append(
+            f"{label} ({ecosystem}) must define directory or directories."
+        )
+        return errors
+
+    locations: list[str] = []
+
+    if has_directory:
+        directory = update.get("directory")
+        if not isinstance(directory, str) or not directory.strip():
+            errors.append(
+                f"{label} ({ecosystem}) directory must be a non-empty string."
+            )
+        else:
+            locations.append(directory.strip())
+            if "*" in directory:
+                errors.append(
+                    f"{label} ({ecosystem}) directory does not support globbing; "
+                    "use directories for wildcard locations."
+                )
+
+    if has_directories:
+        directories = update.get("directories")
+        if not isinstance(directories, list) or not directories:
+            errors.append(
+                f"{label} ({ecosystem}) directories must be a non-empty list."
+            )
+        else:
+            valid_locations: list[str] = []
+            for position, directory in enumerate(directories, start=1):
+                if not isinstance(directory, str) or not directory.strip():
+                    errors.append(
+                        f"{label} ({ecosystem}) directories[{position}] must be "
+                        "a non-empty string."
+                    )
+                    continue
+                valid_locations.append(directory.strip())
+
+            locations.extend(valid_locations)
+            if len(valid_locations) != len(set(valid_locations)):
+                errors.append(
+                    f"{label} ({ecosystem}) directories must not contain duplicates."
+                )
+
+    if ecosystem == "github-actions" and locations:
+        if any(location != "/" for location in locations):
+            errors.append(
+                f"{label} (github-actions) must use / as its manifest directory."
+            )
+
+    return errors
+
+
+def validate_dependency_groups_structure(
+    update: dict[str, Any],
+    *,
+    label: str,
+    ecosystem: str,
+) -> list[str]:
+    """Validate ordinary dependency-group identifiers and value types."""
+
+    groups = update.get("groups")
+    if groups is None:
+        return []
+
+    if not isinstance(groups, dict):
+        return [f"{label} ({ecosystem}) groups must be a mapping."]
+
+    errors: list[str] = []
+    for group_name, definition in groups.items():
+        group_label = f"{label} ({ecosystem}) group {group_name!r}"
+
+        if (
+            not isinstance(group_name, str)
+            or GROUP_IDENTIFIER_PATTERN.fullmatch(group_name) is None
+        ):
+            errors.append(
+                f"{group_label} has an invalid identifier; group names must start "
+                "and end with a letter and may contain letters, |, _, or -."
+            )
+
+        if not isinstance(definition, dict):
+            errors.append(f"{group_label} must be a mapping.")
+            continue
+
+        for key in ("patterns", "exclude-patterns"):
+            value = definition.get(key)
+            if value is not None and (
+                not isinstance(value, list)
+                or not value
+                or not all(
+                    isinstance(item, str) and item.strip()
+                    for item in value
+                )
+            ):
+                errors.append(
+                    f"{group_label} {key} must be a non-empty list of strings."
+                )
+
+        applies_to = definition.get("applies-to")
+        if (
+            applies_to is not None
+            and applies_to not in ALLOWED_GROUP_APPLIES_TO
+        ):
+            errors.append(
+                f"{group_label} applies-to must be version-updates or "
+                "security-updates."
+            )
+
+        dependency_type = definition.get("dependency-type")
+        if (
+            dependency_type is not None
+            and dependency_type not in ALLOWED_GROUP_DEPENDENCY_TYPES
+        ):
+            errors.append(
+                f"{group_label} dependency-type must be development or production."
+            )
+
+        group_by = definition.get("group-by")
+        if group_by is not None and group_by != "dependency-name":
+            errors.append(
+                f"{group_label} group-by must be dependency-name."
+            )
+
+        update_types = definition.get("update-types")
+        if update_types is not None:
+            if (
+                not isinstance(update_types, list)
+                or not update_types
+                or not all(
+                    isinstance(item, str)
+                    and item in ALLOWED_GROUP_UPDATE_TYPES
+                    for item in update_types
+                )
+            ):
+                errors.append(
+                    f"{group_label} update-types must be a non-empty list "
+                    "containing only major, minor, or patch."
+                )
+
+    return errors
 
 
 def validate_schedule(
@@ -692,13 +905,27 @@ def validate(
             errors.append(f"{label} must define package-ecosystem.")
             ecosystem = "<unknown>"
         else:
+            ecosystem = ecosystem.strip()
+            if ecosystem not in SUPPORTED_ECOSYSTEMS:
+                errors.append(
+                    f"{label} uses unsupported package-ecosystem {ecosystem!r}."
+                )
             configured_ecosystems.add(ecosystem)
 
-        has_location = "directory" in raw_update or "directories" in raw_update
-        if not has_location:
-            errors.append(
-                f"{label} ({ecosystem}) must define directory or directories."
+        errors.extend(
+            validate_location_structure(
+                raw_update,
+                label=label,
+                ecosystem=ecosystem,
             )
+        )
+        errors.extend(
+            validate_dependency_groups_structure(
+                raw_update,
+                label=label,
+                ecosystem=ecosystem,
+            )
+        )
 
         if "multi-ecosystem-group" not in raw_update:
             errors.extend(

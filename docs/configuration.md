@@ -84,3 +84,28 @@ Safe Dependabot checks that:
 - grouped entries do not receive a standalone missing-`open-pull-requests-limit` warning.
 
 Other per-ecosystem policy rules still apply to grouped update entries.
+
+
+## Structural validation
+
+Before policy rules run, Safe Dependabot performs lightweight structural checks so obvious configuration errors fail in CI rather than later inside Dependabot.
+
+The validator checks:
+
+- `package-ecosystem` against GitHub's currently supported YAML values;
+- exactly one of `directory` or `directories`;
+- non-empty string locations and non-empty `directories` lists;
+- globbing only through `directories`, not `directory`;
+- `github-actions` coverage from the repository root (`/`);
+- ordinary dependency-group identifiers and common group option types.
+
+Supported package ecosystem values currently include:
+
+```text
+bazel, bun, bundler, cargo, composer, conda, deno, devcontainers,
+docker, docker-compose, dotnet-sdk, elm, gitsubmodule, github-actions,
+gomod, gradle, helm, julia, maven, mix, nix, npm, nuget, opentofu,
+pip, pre-commit, pub, rust-toolchain, sbt, swift, terraform, uv, vcpkg
+```
+
+This is intentionally a lightweight schema layer rather than a replacement for Dependabot Core's complete configuration parser.
