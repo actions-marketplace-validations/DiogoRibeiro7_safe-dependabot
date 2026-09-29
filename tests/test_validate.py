@@ -614,6 +614,158 @@ def test_github_actions_block_can_be_required() -> None:
     assert "A github-actions update block is required by policy." in errors
 
 
+def test_every_supported_ecosystem_has_a_detection_fixture(tmp_path: Path) -> None:
+    """The detector should have at least one reliable signal per supported ecosystem."""
+
+    fixtures: dict[str, list[tuple[str, str]]] = {
+        "bazel": [("bazel/MODULE.bazel", "")],
+        "bun": [
+            ("bun/package.json", '{"name":"bun-demo"}'),
+            ("bun/bun.lock", ""),
+        ],
+        "bundler": [("ruby/Gemfile", 'gem "rake"')],
+        "cargo": [("rust/Cargo.toml", "[package]\nname='demo'\nversion='0.1.0'\n")],
+        "composer": [("php/composer.json", "{}")],
+        "conda": [("conda/environment.yml", "dependencies:\n  - python\n")],
+        "deno": [("deno/deno.json", "{}")],
+        "devcontainers": [(".devcontainer/devcontainer.json", "{}")],
+        "docker": [("container/Dockerfile", "FROM python:3.12\n")],
+        "docker-compose": [("compose/docker-compose.yml", "services: {}\n")],
+        "dotnet-sdk": [("dotnet/global.json", "{}")],
+        "elm": [("elm/elm.json", "{}")],
+        "gitsubmodule": [(".gitmodules", "")],
+        "github-actions": [(".github/workflows/ci.yml", "name: CI\n")],
+        "gomod": [("go/go.mod", "module example.com/demo\n")],
+        "gradle": [("gradle-project/gradle/libs.versions.toml", "[versions]\n")],
+        "helm": [("helm/Chart.yaml", "apiVersion: v2\nname: demo\n")],
+        "julia": [("julia/Manifest.toml", "")],
+        "maven": [("maven/pom.xml", "<project />\n")],
+        "mix": [("elixir/mix.exs", "")],
+        "nix": [
+            ("nix/flake.nix", "{}\n"),
+            ("nix/flake.lock", "{}\n"),
+        ],
+        "npm": [("node/package.json", '{"name":"node-demo"}')],
+        "nuget": [("nuget/app.csproj", "<Project />\n")],
+        "opentofu": [("tofu/main.tofu", 'terraform {}\n')],
+        "pip": [("python/requirements.txt", "pyyaml==6.0.2\n")],
+        "pre-commit": [("hooks/.pre-commit-config.yaml", "repos: []\n")],
+        "pub": [("dart/pubspec.yaml", "name: demo\n")],
+        "rust-toolchain": [
+            (
+                "toolchain/rust-toolchain.toml",
+                '[toolchain]\nchannel = "1.90"\n',
+            )
+        ],
+        "sbt": [("scala/build.sbt", 'scalaVersion := "3.7.0"\n')],
+        "swift": [("swift/Package.swift", "// swift-tools-version: 6.0\n")],
+        "terraform": [("terraform/main.tf", 'terraform {}\n')],
+        "uv": [
+            ("uv/pyproject.toml", "[project]\nname='demo'\n"),
+            ("uv/uv.lock", "version = 1\n"),
+        ],
+        "vcpkg": [("cpp/vcpkg.json", "{}")],
+    }
+
+    assert set(fixtures) == set(validator.SUPPORTED_ECOSYSTEMS)
+
+    for files in fixtures.values():
+        for relative_path, content in files:
+            path = tmp_path / relative_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+
+    detected = validator.detect_ecosystems(tmp_path)
+
+    assert set(detected) == set(validator.SUPPORTED_ECOSYSTEMS)
+
+
+def test_github_actions_workflow_maps_to_repository_root() -> None:
+    """GitHub Actions workflows are configured with directory /."""
+
+    assert (
+        validator.manifest_directory(
+            ".github/workflows/ci.yml",
+            "github-actions",
+        )
+        == "/"
+    )
+
+
+def test_gradle_version_catalog_maps_to_project_root() -> None:
+    """A Gradle catalog under gradle/ belongs to the containing project."""
+
+    assert (
+        validator.manifest_directory(
+            "services/api/gradle/libs.versions.toml",
+            "gradle",
+        )
+        == "/services/api"
+    )
+
+
+def test_devcontainer_maps_to_containing_project_root() -> None:
+    """A .devcontainer manifest belongs to its containing project."""
+
+    assert (
+        validator.manifest_directory(
+            "services/api/.devcontainer/devcontainer.json",
+            "devcontainers",
+        )
+        == "/services/api"
+    )
+
+
+def test_terraform_files_are_detected_without_lockfile(tmp_path: Path) -> None:
+    """Terraform should not require a committed lockfile for detection."""
+
+    path = tmp_path / "infra" / "main.tf"
+    path.parent.mkdir(parents=True)
+    path.write_text('terraform {}\n', encoding="utf-8")
+
+    detected = validator.detect_ecosystems(tmp_path)
+
+    assert detected == {"terraform": ["infra/main.tf"]}
+
+
+def test_opentofu_signal_claims_shared_hcl_lockfile(tmp_path: Path) -> None:
+    """An OpenTofu-specific manifest should disambiguate the shared lockfile."""
+
+    directory = tmp_path / "infra"
+    directory.mkdir()
+    (directory / "main.tofu").write_text('terraform {}\n', encoding="utf-8")
+    (directory / ".terraform.lock.hcl").write_text("", encoding="utf-8")
+
+    detected = validator.detect_ecosystems(tmp_path)
+
+    assert set(detected) == {"opentofu"}
+    assert sorted(detected["opentofu"]) == [
+        "infra/.terraform.lock.hcl",
+        "infra/main.tofu",
+    ]
+
+
+def test_kubernetes_image_manifest_detects_docker(tmp_path: Path) -> None:
+    """Docker ecosystem should detect supported Kubernetes image references."""
+
+    manifest = tmp_path / "k8s" / "deployment.yaml"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(
+        "apiVersion: apps/v1\n"
+        "kind: Deployment\n"
+        "spec:\n"
+        "  template:\n"
+        "    spec:\n"
+        "      containers:\n"
+        "        - image: nginx:1.29\n",
+        encoding="utf-8",
+    )
+
+    detected = validator.detect_ecosystems(tmp_path)
+
+    assert detected == {"docker": ["k8s/deployment.yaml"]}
+
+
 def test_detects_multiple_ecosystems(tmp_path: Path) -> None:
     """Repository manifests should map to the matching Dependabot ecosystems."""
 

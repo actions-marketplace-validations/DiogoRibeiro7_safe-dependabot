@@ -65,7 +65,7 @@ The action exposes `update-blocks`, the number of Dependabot update blocks that 
 
 ## Ecosystem detection
 
-Safe Dependabot detects common dependency manifests and checks that Dependabot covers the matching ecosystem. Examples include:
+Safe Dependabot detects the full current set of supported Dependabot ecosystem IDs and checks that each detected manifest location is covered. Examples include:
 
 | Manifest | Dependabot ecosystem |
 | --- | --- |
@@ -86,6 +86,16 @@ Safe Dependabot detects common dependency manifests and checks that Dependabot c
 | `global.json` | `dotnet-sdk` |
 | `.terraform.lock.hcl` | `terraform` |
 | `.pre-commit-config.yaml` | `pre-commit` |
+| `environment.yml` | `conda` |
+| `devcontainer.json` | `devcontainers` |
+| Dockerfile/Containerfile | `docker` |
+| `docker-compose.yml`, `compose.yaml` | `docker-compose` |
+| `Chart.yaml` | `helm` |
+| `.gitmodules` | `gitsubmodule` |
+| `flake.nix` + `flake.lock` | `nix` |
+| `*.tofu`, `terragrunt.hcl` | `opentofu` |
+| `rust-toolchain.toml` | `rust-toolchain` |
+| `build.sbt` | `sbt` |
 
 Generated dependency directories such as `node_modules`, `vendor`, `target`, virtual environments, and build output are ignored.
 

@@ -1,33 +1,70 @@
 # Ecosystem detection
 
-Safe Dependabot scans the checked-out repository for dependency manifests and maps them to the ecosystem identifiers used by Dependabot.
+Safe Dependabot scans the checked-out repository for dependency manifests and maps them to the ecosystem identifiers supported by Dependabot.
+
+The supported ecosystem IDs come from the same `SUPPORTED_ECOSYSTEMS` source of truth used by structural validation, and the test suite requires at least one detection fixture for every supported ecosystem.
 
 ## Detected manifests
 
-| Manifest | Ecosystem |
+| Manifest or signal | Ecosystem |
 | --- | --- |
-| `pyproject.toml`, `requirements*.txt`, `poetry.lock`, `Pipfile` | `pip` |
-| `pyproject.toml` with `uv.lock` | `uv` |
-| `Cargo.toml` | `cargo` |
-| `package.json` | `npm` |
-| `package.json` with `bun.lock` or `bun.lockb` | `bun` |
-| `deno.json`, `deno.jsonc`, `deno.lock` | `deno` |
-| `go.mod` | `gomod` |
+| `MODULE.bazel`, `WORKSPACE`, `WORKSPACE.bazel` | `bazel` |
+| `package.json` with text-based `bun.lock` | `bun` |
 | `Gemfile`, `*.gemspec` | `bundler` |
+| `Cargo.toml` | `cargo` |
 | `composer.json` | `composer` |
-| `pom.xml` | `maven` |
-| Gradle build/settings files | `gradle` |
-| `mix.exs` | `mix` |
-| `pubspec.yaml` | `pub` |
-| `Package.swift` | `swift` |
-| .NET project files and `packages.config` | `nuget` |
+| `environment.yml`, `environment.yaml` | `conda` |
+| `deno.json`, `deno.jsonc`, `deno.lock` | `deno` |
+| `devcontainer.json`, `.devcontainer.json` | `devcontainers` |
+| Dockerfile/Containerfile names; Kubernetes YAML with image references | `docker` |
+| Docker Compose filenames such as `docker-compose.yml`, `compose.yaml`, overrides | `docker-compose` |
 | `global.json` | `dotnet-sdk` |
-| Julia `Manifest.toml` / `Project.toml` | `julia` |
-| `.terraform.lock.hcl` | `terraform` |
-| `.pre-commit-config.yaml` | `pre-commit` |
-| Bazel module/workspace files | `bazel` |
 | `elm.json` | `elm` |
+| `.gitmodules` | `gitsubmodule` |
+| `.github/workflows/*.yml`, `.github/workflows/*.yaml`, root `action.yml`/`action.yaml` | `github-actions` |
+| `go.mod` | `gomod` |
+| Gradle build/settings files, `gradle.lockfile`, `gradle/libs.versions.toml` | `gradle` |
+| `Chart.yaml` | `helm` |
+| `Manifest.toml`; `Project.toml` beside a manifest | `julia` |
+| `pom.xml` | `maven` |
+| `mix.exs` | `mix` |
+| paired `flake.nix` + `flake.lock` | `nix` |
+| `package.json` without a Bun lockfile | `npm` |
+| .NET project files and `packages.config` | `nuget` |
+| `*.tofu`, `terragrunt.hcl`; shared HCL lockfiles beside an OpenTofu signal | `opentofu` |
+| `pyproject.toml`, `requirements*.txt`, `poetry.lock`, `Pipfile` | `pip` |
+| `.pre-commit-config.yaml`, `.pre-commit-config.yml` | `pre-commit` |
+| `pubspec.yaml` | `pub` |
+| `rust-toolchain`, `rust-toolchain.toml` | `rust-toolchain` |
+| `build.sbt` | `sbt` |
+| `Package.swift` | `swift` |
+| `*.tf`, `.terraform.lock.hcl` without an OpenTofu-specific signal | `terraform` |
+| `pyproject.toml` + `uv.lock` | `uv` |
 | `vcpkg.json` | `vcpkg` |
+
+## Ambiguous manifests
+
+Terraform and OpenTofu intentionally share `.tf` files and `.terraform.lock.hcl`. A filesystem-only detector cannot always distinguish a pure OpenTofu project that uses only Terraform-compatible `.tf` syntax.
+
+Safe Dependabot therefore uses deterministic signals:
+
+- `*.tofu` or `terragrunt.hcl` identifies `opentofu`;
+- a shared `.terraform.lock.hcl` in the same directory follows that OpenTofu signal;
+- otherwise plain `*.tf` and the shared lockfile are classified as `terraform`.
+
+This avoids requiring both ecosystems for one HCL project while documenting the remaining ambiguity.
+
+The legacy binary `bun.lockb` is intentionally not a supported Bun signal. GitHub currently supports the text-based `bun.lock` format.
+
+## Coverage directories
+
+Some Dependabot ecosystems store managed files below the directory configured in `dependabot.yml`:
+
+- GitHub Actions workflows under `.github/workflows/` are covered by `directory: /`.
+- `gradle/libs.versions.toml` is covered from the containing Gradle project directory.
+- `.devcontainer/devcontainer.json` is covered from the containing project directory.
+
+Safe Dependabot normalizes these cases before directory-level coverage validation.
 
 ## Ignored directories
 

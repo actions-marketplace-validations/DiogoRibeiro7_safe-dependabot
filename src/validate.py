@@ -98,6 +98,14 @@ NUGET_SUFFIXES: Final[set[str]] = {
     ".vbproj",
     ".vcxproj",
 }
+DOCKER_COMPOSE_FILENAME_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^(docker-)?compose(-[\w]+)?(?:\.[\w-]+)?\.ya?ml$",
+    re.IGNORECASE,
+)
+DOCKERFILE_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"dockerfile|containerfile",
+    re.IGNORECASE,
+)
 
 
 class PolicyError(ValueError):
@@ -176,11 +184,68 @@ def load_config(path: Path) -> dict[str, Any]:
     return raw
 
 
-def manifest_ecosystem(path: Path) -> str | None:
+def relative_manifest_path(path: Path, root: Path | None) -> PurePosixPath:
+    """Return a repository-relative manifest path when a root is available."""
+
+    if root is not None:
+        try:
+            return PurePosixPath(path.relative_to(root).as_posix())
+        except ValueError:
+            pass
+    return PurePosixPath(path.as_posix())
+
+
+def is_github_actions_manifest(path: Path, root: Path | None) -> bool:
+    """Return whether a path is a Dependabot-managed GitHub Actions manifest."""
+
+    relative = relative_manifest_path(path, root)
+    parts = relative.parts
+    if (
+        len(parts) == 3
+        and parts[0] == ".github"
+        and parts[1] == "workflows"
+        and relative.suffix.lower() in {".yml", ".yaml"}
+    ):
+        return True
+
+    return len(parts) == 1 and relative.name in {"action.yml", "action.yaml"}
+
+
+def looks_like_kubernetes_manifest(path: Path) -> bool:
+    """Return whether YAML content looks like a Kubernetes image manifest."""
+
+    if path.suffix.lower() not in {".yml", ".yaml"}:
+        return False
+
+    try:
+        content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return False
+
+    has_api_version = re.search(r"(?m)^\s*apiVersion\s*:", content) is not None
+    has_kind = re.search(r"(?m)^\s*kind\s*:", content) is not None
+    has_image = (
+        re.search(r"(?m)^\s*(?:-\s*)?image\s*:", content) is not None
+    )
+    return has_api_version and has_kind and has_image
+
+
+def has_opentofu_signal(directory: Path) -> bool:
+    """Return whether a directory contains an unambiguous OpenTofu signal."""
+
+    if (directory / "terragrunt.hcl").is_file():
+        return True
+    return any(directory.glob("*.tofu"))
+
+
+def manifest_ecosystem(path: Path, root: Path | None = None) -> str | None:
     """Map a dependency manifest or lock file to a Dependabot ecosystem."""
 
     name = path.name
     suffix = path.suffix.lower()
+
+    if is_github_actions_manifest(path, root):
+        return "github-actions"
 
     if name == "uv.lock":
         return "uv"
@@ -197,12 +262,13 @@ def manifest_ecosystem(path: Path) -> str | None:
 
     if name == "Cargo.toml":
         return "cargo"
+    if name in {"environment.yml", "environment.yaml"}:
+        return "conda"
+    if name.endswith("devcontainer.json"):
+        return "devcontainers"
 
     if name == "package.json":
-        has_bun_lock = any(
-            (path.parent / lock_name).is_file()
-            for lock_name in ("bun.lock", "bun.lockb")
-        )
+        has_bun_lock = (path.parent / "bun.lock").is_file()
         return "bun" if has_bun_lock else "npm"
 
     if name in {"deno.json", "deno.jsonc", "deno.lock"}:
@@ -213,6 +279,12 @@ def manifest_ecosystem(path: Path) -> str | None:
         return "bundler"
     if name == "composer.json":
         return "composer"
+    if DOCKER_COMPOSE_FILENAME_PATTERN.fullmatch(name):
+        return "docker-compose"
+    if name == "Chart.yaml":
+        return "helm"
+    if name == ".gitmodules":
+        return "gitsubmodule"
     if name == "pom.xml":
         return "maven"
     if name in {
@@ -220,7 +292,10 @@ def manifest_ecosystem(path: Path) -> str | None:
         "build.gradle.kts",
         "settings.gradle",
         "settings.gradle.kts",
+        "gradle.lockfile",
     }:
+        return "gradle"
+    if name == "libs.versions.toml" and path.parent.name == "gradle":
         return "gradle"
     if name == "mix.exs":
         return "mix"
@@ -228,6 +303,10 @@ def manifest_ecosystem(path: Path) -> str | None:
         return "pub"
     if name == "Package.swift":
         return "swift"
+    if name in {"rust-toolchain", "rust-toolchain.toml"}:
+        return "rust-toolchain"
+    if name == "build.sbt":
+        return "sbt"
     if name == "packages.config" or suffix in NUGET_SUFFIXES:
         return "nuget"
     if name == "global.json":
@@ -236,8 +315,16 @@ def manifest_ecosystem(path: Path) -> str | None:
         return "julia"
     if name == "Project.toml" and (path.parent / "Manifest.toml").is_file():
         return "julia"
+    if name == "flake.lock" and (path.parent / "flake.nix").is_file():
+        return "nix"
+    if name == "flake.nix" and (path.parent / "flake.lock").is_file():
+        return "nix"
+    if name == "terragrunt.hcl" or suffix == ".tofu":
+        return "opentofu"
     if name == ".terraform.lock.hcl":
-        return "terraform"
+        return "opentofu" if has_opentofu_signal(path.parent) else "terraform"
+    if suffix == ".tf":
+        return "opentofu" if has_opentofu_signal(path.parent) else "terraform"
     if name in {".pre-commit-config.yaml", ".pre-commit-config.yml"}:
         return "pre-commit"
     if name in {"MODULE.bazel", "WORKSPACE", "WORKSPACE.bazel"}:
@@ -246,6 +333,10 @@ def manifest_ecosystem(path: Path) -> str | None:
         return "elm"
     if name == "vcpkg.json":
         return "vcpkg"
+    if DOCKERFILE_NAME_PATTERN.search(name):
+        return "docker"
+    if looks_like_kubernetes_manifest(path):
+        return "docker"
 
     return None
 
@@ -263,7 +354,7 @@ def detect_ecosystems(root: Path) -> dict[str, list[str]]:
 
         for file_name in sorted(file_names):
             path = directory_path / file_name
-            ecosystem = manifest_ecosystem(path)
+            ecosystem = manifest_ecosystem(path, root)
             if ecosystem is None:
                 continue
 
@@ -603,10 +694,30 @@ def normalize_directory(value: str) -> str:
     return f"/{normalized.strip('/')}"
 
 
-def manifest_directory(manifest: str) -> str:
-    """Return the normalized repository directory containing a manifest."""
+def manifest_directory(manifest: str, ecosystem: str | None = None) -> str:
+    """Return the Dependabot directory that owns a detected manifest."""
 
-    parent = PurePosixPath(manifest).parent.as_posix()
+    path = PurePosixPath(manifest)
+
+    if ecosystem == "github-actions":
+        return "/"
+
+    if (
+        ecosystem == "gradle"
+        and path.name == "libs.versions.toml"
+        and path.parent.name == "gradle"
+    ):
+        parent = path.parent.parent.as_posix()
+        return "/" if parent == "." else normalize_directory(parent)
+
+    if ecosystem == "devcontainers":
+        parent_path = path.parent
+        if path.name == "devcontainer.json" and parent_path.name == ".devcontainer":
+            parent_path = parent_path.parent
+        parent = parent_path.as_posix()
+        return "/" if parent == "." else normalize_directory(parent)
+
+    parent = path.parent.as_posix()
     if parent == ".":
         return "/"
     return normalize_directory(parent)
@@ -692,10 +803,14 @@ def update_location_patterns(update: dict[str, Any]) -> list[tuple[str, bool]]:
     return locations
 
 
-def update_covers_manifest(update: dict[str, Any], manifest: str) -> bool:
+def update_covers_manifest(
+    update: dict[str, Any],
+    manifest: str,
+    ecosystem: str | None = None,
+) -> bool:
     """Return whether an update block covers one detected manifest."""
 
-    directory = manifest_directory(manifest)
+    directory = manifest_directory(manifest, ecosystem)
 
     matched = False
     for location, supports_globbing in update_location_patterns(update):
@@ -790,9 +905,10 @@ def validate_detected_ecosystems(
 
         manifests_by_directory: dict[str, list[str]] = {}
         for manifest in manifests:
-            manifests_by_directory.setdefault(manifest_directory(manifest), []).append(
-                manifest
-            )
+            manifests_by_directory.setdefault(
+                manifest_directory(manifest, ecosystem),
+                [],
+            ).append(manifest)
 
         applicable_blocks = [
             (index, update)
@@ -809,7 +925,7 @@ def validate_detected_ecosystems(
                 index
                 for index, update in applicable_blocks
                 if any(
-                    update_covers_manifest(update, manifest)
+                    update_covers_manifest(update, manifest, ecosystem)
                     for manifest in directory_manifests
                 )
             ]
