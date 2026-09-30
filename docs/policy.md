@@ -23,6 +23,25 @@ The intention is not to avoid major upgrades permanently. It is to make routine 
 !!! warning "Pre-1.0 dependencies"
     Semantic versioning allows breaking changes in minor releases before version 1.0. A `0.4 -> 0.5` update can therefore still be breaking even when it is not classified as semver-major.
 
+Safe Dependabot can optionally inspect **exact or resolved direct dependency versions** and surface this risk:
+
+```yaml
+- uses: DiogoRibeiro7/safe-dependabot@v1
+  with:
+    pre-one-risk: warn
+```
+
+The input accepts `off` (default), `warn`, or `fail`. The check is deliberately conservative: it reports a dependency only when Safe Dependabot can establish an exact/resolved `0.x` version rather than guessing from a loose constraint such as `>=0.4`.
+
+Initial support covers:
+
+- Python exact pins in `requirements*.txt` and PEP 621 `pyproject.toml` dependencies;
+- npm direct dependencies resolved through `package-lock.json`, with exact package.json versions as a fallback;
+- Cargo direct dependencies resolved through the nearest `Cargo.lock`;
+- Bundler direct dependencies resolved through `Gemfile.lock`.
+
+Diagnostics name the dependency, resolved version, ecosystem, and manifest, and explain that a major-only update guard does not protect pre-1.0 minor releases. Detector ignore paths and the ignored-directory inclusion setting are reused by this scan.
+
 ## Pull-request limits
 
 Dependabot can generate substantial PR churn in repositories with many dependency groups. GitHub's default for standalone version-update blocks is five open pull requests when `open-pull-requests-limit` is omitted.

@@ -15,6 +15,7 @@ Safe Dependabot exposes a small set of inputs so repositories can tighten or rel
 | `detection-ignore-paths` | empty | Newline-separated repository-relative globs excluded from detection. |
 | `detection-overrides` | empty | Newline-separated `glob=ecosystem` rules overriding automatic classification. |
 | `include-ignored-directories` | `false` | Scan normally ignored build/vendor/cache directory names; `.git` always remains excluded. |
+| `pre-one-risk` | `off` | Optional direct dependency compatibility-risk policy: `off`, `warn`, or `fail`. |
 
 ## Outputs
 
@@ -26,6 +27,8 @@ Safe Dependabot exposes a small set of inputs so repositories can tighten or rel
 | `detection-overridden-count` | Number of manifests reclassified by detector overrides. |
 | `excluded-manifests` | Comma-separated excluded repository-relative paths. |
 | `overridden-manifests` | Comma-separated applied `path=ecosystem` overrides. |
+| `pre-one-risk-count` | Number of exact/resolved direct dependencies found on pre-1.0 versions. |
+| `pre-one-risk-findings` | Comma-separated `ecosystem:dependency@version:manifest` findings. |
 
 ## Example
 
@@ -187,3 +190,18 @@ schedule:
   interval: cron
   cronjob: "0 9 * * *"
 ```
+
+
+## Pre-1.0 compatibility-risk checks
+
+Set `pre-one-risk` to `warn` or `fail` to inspect exact/resolved direct dependency versions for `0.x` packages:
+
+```yaml
+- uses: DiogoRibeiro7/safe-dependabot@v1
+  with:
+    pre-one-risk: warn
+```
+
+The default is `off` for backward compatibility. The scanner intentionally skips loose constraints when it cannot establish a resolved version, which keeps the feature advisory rather than speculative.
+
+Supported sources initially include Python requirements/PEP 621 declarations, npm with package-lock resolution, Cargo with Cargo.lock resolution, and Bundler with Gemfile.lock resolution.

@@ -229,6 +229,163 @@ def test_group_update_types_validate_supported_values() -> None:
     assert any("containing only major, minor, or patch" in error for error in errors)
 
 
+def test_python_pre_one_exact_pin_is_detected(tmp_path: Path) -> None:
+    """Python exact direct pins on 0.x should be reported."""
+
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text(
+        "risky==0.4.2\nstable==1.2.0\nloose>=0.3\n",
+        encoding="utf-8",
+    )
+
+    findings = validator.scan_pre_one_risks(tmp_path)
+
+    assert findings == [
+        validator.PreOneRiskFinding(
+            ecosystem="pip",
+            dependency="risky",
+            version="0.4.2",
+            manifest="requirements.txt",
+        )
+    ]
+
+
+def test_npm_pre_one_uses_resolved_direct_dependency(tmp_path: Path) -> None:
+    """npm package-lock should resolve a direct dependency's actual version."""
+
+    (tmp_path / "package.json").write_text(
+        '{"dependencies":{"risky":"^0.4.0","stable":"^1.0.0"}}',
+        encoding="utf-8",
+    )
+    (tmp_path / "package-lock.json").write_text(
+        '{"lockfileVersion":3,"packages":{'
+        '"":{"dependencies":{"risky":"^0.4.0","stable":"^1.0.0"}},'
+        '"node_modules/risky":{"version":"0.4.7"},'
+        '"node_modules/stable":{"version":"1.3.0"}}}',
+        encoding="utf-8",
+    )
+
+    findings = validator.scan_pre_one_risks(tmp_path)
+
+    assert findings == [
+        validator.PreOneRiskFinding(
+            ecosystem="npm",
+            dependency="risky",
+            version="0.4.7",
+            manifest="package.json",
+        )
+    ]
+
+
+def test_cargo_pre_one_uses_lockfile_for_direct_dependency(tmp_path: Path) -> None:
+    """Cargo direct dependencies should be resolved from Cargo.lock."""
+
+    (tmp_path / "Cargo.toml").write_text(
+        "[package]\nname = 'demo'\nversion = '1.0.0'\n"
+        "[dependencies]\nrisky = '0.4'\nstable = '1'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "Cargo.lock").write_text(
+        "[[package]]\nname = 'risky'\nversion = '0.4.3'\n"
+        "[[package]]\nname = 'stable'\nversion = '1.2.0'\n",
+        encoding="utf-8",
+    )
+
+    findings = validator.scan_pre_one_risks(tmp_path)
+
+    assert findings == [
+        validator.PreOneRiskFinding(
+            ecosystem="cargo",
+            dependency="risky",
+            version="0.4.3",
+            manifest="Cargo.toml",
+        )
+    ]
+
+
+def test_bundler_pre_one_uses_direct_lockfile_dependencies(tmp_path: Path) -> None:
+    """Bundler should distinguish direct gems from transitive pre-1.0 gems."""
+
+    (tmp_path / "Gemfile.lock").write_text(
+        "GEM\n"
+        "  specs:\n"
+        "    risky (0.8.1)\n"
+        "      transitive (~> 0.2)\n"
+        "    stable (1.4.0)\n"
+        "    transitive (0.2.5)\n"
+        "\nDEPENDENCIES\n"
+        "  risky\n"
+        "  stable\n",
+        encoding="utf-8",
+    )
+
+    findings = validator.scan_pre_one_risks(tmp_path)
+
+    assert findings == [
+        validator.PreOneRiskFinding(
+            ecosystem="bundler",
+            dependency="risky",
+            version="0.8.1",
+            manifest="Gemfile.lock",
+        )
+    ]
+
+
+def test_pre_one_policy_warn_mode_names_dependency() -> None:
+    """Warn mode should explain why major-only protection is insufficient."""
+
+    finding = validator.PreOneRiskFinding(
+        ecosystem="npm",
+        dependency="risky",
+        version="0.4.0",
+        manifest="package.json",
+    )
+
+    errors, warnings = validator.apply_pre_one_risk_policy(
+        [finding],
+        "warn",
+    )
+
+    assert errors == []
+    assert len(warnings) == 1
+    assert "'risky'" in warnings[0]
+    assert "0.x minor updates can contain breaking changes" in warnings[0]
+
+
+def test_pre_one_policy_fail_mode_promotes_finding_to_error() -> None:
+    """Fail mode should turn the same compatibility risk into an error."""
+
+    finding = validator.PreOneRiskFinding(
+        ecosystem="cargo",
+        dependency="risky",
+        version="0.7.0",
+        manifest="Cargo.toml",
+    )
+
+    errors, warnings = validator.apply_pre_one_risk_policy(
+        [finding],
+        "fail",
+    )
+
+    assert len(errors) == 1
+    assert warnings == []
+
+
+def test_pre_one_scan_respects_detector_ignore_paths(tmp_path: Path) -> None:
+    """Detector exclusions should also suppress pre-1.0 risk findings."""
+
+    fixture = tmp_path / "fixtures" / "requirements.txt"
+    fixture.parent.mkdir()
+    fixture.write_text("risky==0.2.0\n", encoding="utf-8")
+
+    findings = validator.scan_pre_one_risks(
+        tmp_path,
+        ignore_paths=["fixtures/**"],
+    )
+
+    assert findings == []
+
+
 def test_safe_configuration_passes() -> None:
     """A conservative configuration should pass without warnings."""
 

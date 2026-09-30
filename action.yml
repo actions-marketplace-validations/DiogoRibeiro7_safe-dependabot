@@ -42,6 +42,10 @@ inputs:
     description: "Scan normally ignored build/vendor/cache directory names; .git always remains excluded."
     required: false
     default: "false"
+  pre-one-risk:
+    description: "Pre-1.0 direct dependency policy: off, warn, or fail."
+    required: false
+    default: "off"
 
 outputs:
   update-blocks:
@@ -56,6 +60,10 @@ outputs:
     description: "Comma-separated repository-relative manifest paths excluded from detection."
   overridden-manifests:
     description: "Comma-separated path=ecosystem detector overrides that were applied."
+  pre-one-risk-count:
+    description: "Number of exact/resolved direct dependencies found on pre-1.0 versions."
+  pre-one-risk-findings:
+    description: "Comma-separated ecosystem:dependency@version:manifest pre-1.0 findings."
 
 runs:
   using: "docker"
@@ -79,3 +87,5 @@ runs:
     - "${{ inputs.detection-overrides }}"
     - "--include-ignored-directories"
     - "${{ inputs.include-ignored-directories }}"
+    - "--pre-one-risk"
+    - "${{ inputs.pre-one-risk }}"

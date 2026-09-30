@@ -53,6 +53,7 @@ jobs:
     detection-ignore-paths: ""
     detection-overrides: ""
     include-ignored-directories: false
+    pre-one-risk: off
 ```
 
 | Input | Default | Purpose |
@@ -66,6 +67,7 @@ jobs:
 | `detection-ignore-paths` | empty | Exclude selected repository-relative detector paths/globs |
 | `detection-overrides` | empty | Reclassify selected paths with `glob=ecosystem` rules |
 | `include-ignored-directories` | `false` | Scan normally ignored build/vendor/cache directory names |
+| `pre-one-risk` | `off` | Optional `off` / `warn` / `fail` check for resolved direct dependencies on `0.x` versions |
 
 The action exposes `update-blocks`, the number of Dependabot update blocks that were validated, and `detected-ecosystems`, a comma-separated list of ecosystems found from repository manifests.
 

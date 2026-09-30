@@ -7,6 +7,8 @@ import json
 import os
 import re
 import sys
+import tomllib
+from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
 from typing import Any, Final
@@ -121,6 +123,26 @@ DOCKERFILE_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"dockerfile|containerfile",
     re.IGNORECASE,
 )
+PRE_ONE_VERSION_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^v?(0\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?)$"
+)
+PYTHON_EXACT_PIN_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^\]]+\])?\s*"
+    r"(?:===|==)\s*([^\s;#]+)"
+)
+CARGO_EXACT_PIN_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^=\s*(0\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?)$"
+)
+
+
+@dataclass(frozen=True, order=True)
+class PreOneRiskFinding:
+    """One direct dependency resolved or pinned to a pre-1.0 version."""
+
+    ecosystem: str
+    dependency: str
+    version: str
+    manifest: str
 
 
 class PolicyError(ValueError):
@@ -496,6 +518,427 @@ def detect_ecosystems(
         include_ignored_directories=include_ignored_directories,
     )
     return detected
+
+
+def normalize_pre_one_version(value: str) -> str | None:
+    """Return a normalized exact 0.x version, or None for non-exact values."""
+
+    match = PRE_ONE_VERSION_PATTERN.fullmatch(value.strip())
+    if match is None:
+        return None
+    return match.group(1)
+
+
+def make_pre_one_finding(
+    ecosystem: str,
+    dependency: str,
+    version: str,
+    manifest: str,
+) -> PreOneRiskFinding | None:
+    """Build a finding only when the resolved version is pre-1.0."""
+
+    normalized = normalize_pre_one_version(version)
+    if normalized is None:
+        return None
+    return PreOneRiskFinding(
+        ecosystem=ecosystem,
+        dependency=dependency,
+        version=normalized,
+        manifest=manifest,
+    )
+
+
+def python_exact_pin(specification: str) -> tuple[str, str] | None:
+    """Extract a direct Python dependency only when it has an exact 0.x pin."""
+
+    match = PYTHON_EXACT_PIN_PATTERN.match(specification)
+    if match is None:
+        return None
+
+    version = normalize_pre_one_version(match.group(2))
+    if version is None:
+        return None
+
+    return match.group(1), version
+
+
+def scan_python_pre_one(path: Path, relative_path: str) -> list[PreOneRiskFinding]:
+    """Scan supported Python direct dependency declarations."""
+
+    findings: list[PreOneRiskFinding] = []
+
+    if path.name.startswith("requirements") and path.suffix.lower() == ".txt":
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeError):
+            return []
+
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith(("#", "-", ".")):
+                continue
+
+            pin = python_exact_pin(stripped)
+            if pin is None:
+                continue
+
+            dependency, version = pin
+            findings.append(
+                PreOneRiskFinding(
+                    ecosystem="pip",
+                    dependency=dependency,
+                    version=version,
+                    manifest=relative_path,
+                )
+            )
+        return findings
+
+    if path.name != "pyproject.toml":
+        return []
+
+    try:
+        project = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+        return []
+
+    ecosystem = "uv" if (path.parent / "uv.lock").is_file() else "pip"
+    project_table = project.get("project")
+    if not isinstance(project_table, dict):
+        return []
+
+    dependency_lists: list[list[Any]] = []
+    dependencies = project_table.get("dependencies")
+    if isinstance(dependencies, list):
+        dependency_lists.append(dependencies)
+
+    optional = project_table.get("optional-dependencies")
+    if isinstance(optional, dict):
+        dependency_lists.extend(
+            value for value in optional.values() if isinstance(value, list)
+        )
+
+    for dependency_list in dependency_lists:
+        for item in dependency_list:
+            if not isinstance(item, str):
+                continue
+            pin = python_exact_pin(item)
+            if pin is None:
+                continue
+            dependency, version = pin
+            findings.append(
+                PreOneRiskFinding(
+                    ecosystem=ecosystem,
+                    dependency=dependency,
+                    version=version,
+                    manifest=relative_path,
+                )
+            )
+
+    return findings
+
+
+def npm_direct_dependency_names(package: dict[str, Any]) -> set[str]:
+    """Return root npm dependency names from supported direct dependency sections."""
+
+    names: set[str] = set()
+    for section in ("dependencies", "devDependencies", "optionalDependencies"):
+        dependencies = package.get(section)
+        if isinstance(dependencies, dict):
+            names.update(
+                name
+                for name in dependencies
+                if isinstance(name, str) and name.strip()
+            )
+    return names
+
+
+def scan_npm_pre_one(path: Path, relative_path: str) -> list[PreOneRiskFinding]:
+    """Scan npm direct dependencies using package-lock when available."""
+
+    if path.name != "package.json":
+        return []
+
+    try:
+        package = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return []
+    if not isinstance(package, dict):
+        return []
+
+    direct_names = npm_direct_dependency_names(package)
+    if not direct_names:
+        return []
+
+    resolved: dict[str, str] = {}
+    lock_path = path.parent / "package-lock.json"
+    if lock_path.is_file():
+        try:
+            lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            lock = None
+
+        if isinstance(lock, dict):
+            packages = lock.get("packages")
+            if isinstance(packages, dict):
+                for name in direct_names:
+                    entry = packages.get(f"node_modules/{name}")
+                    if isinstance(entry, dict):
+                        version = entry.get("version")
+                        if isinstance(version, str):
+                            resolved[name] = version
+            else:
+                dependencies = lock.get("dependencies")
+                if isinstance(dependencies, dict):
+                    for name in direct_names:
+                        entry = dependencies.get(name)
+                        if isinstance(entry, dict):
+                            version = entry.get("version")
+                            if isinstance(version, str):
+                                resolved[name] = version
+
+    if not resolved:
+        for section in ("dependencies", "devDependencies", "optionalDependencies"):
+            dependencies = package.get(section)
+            if not isinstance(dependencies, dict):
+                continue
+            for name, specification in dependencies.items():
+                if not isinstance(name, str) or not isinstance(specification, str):
+                    continue
+                version = normalize_pre_one_version(specification)
+                if version is not None:
+                    resolved[name] = version
+
+    findings: list[PreOneRiskFinding] = []
+    for name, version in sorted(resolved.items()):
+        finding = make_pre_one_finding("npm", name, version, relative_path)
+        if finding is not None:
+            findings.append(finding)
+    return findings
+
+
+def cargo_direct_dependency_names(project: dict[str, Any]) -> set[str]:
+    """Return Cargo dependency package names from direct dependency sections."""
+
+    names: set[str] = set()
+
+    def add_section(section: Any) -> None:
+        if not isinstance(section, dict):
+            return
+        for name, specification in section.items():
+            if not isinstance(name, str):
+                continue
+            if isinstance(specification, dict):
+                package = specification.get("package")
+                names.add(package if isinstance(package, str) else name)
+            else:
+                names.add(name)
+
+    for section_name in ("dependencies", "dev-dependencies", "build-dependencies"):
+        add_section(project.get(section_name))
+
+    workspace = project.get("workspace")
+    if isinstance(workspace, dict):
+        add_section(workspace.get("dependencies"))
+
+    return names
+
+
+def nearest_cargo_lock(path: Path, root: Path) -> Path | None:
+    """Return the nearest Cargo.lock between a manifest and repository root."""
+
+    directory = path.parent
+    while True:
+        candidate = directory / "Cargo.lock"
+        if candidate.is_file():
+            return candidate
+        if directory == root or root not in directory.parents:
+            return None
+        directory = directory.parent
+
+
+def scan_cargo_pre_one(
+    path: Path,
+    relative_path: str,
+    root: Path,
+) -> list[PreOneRiskFinding]:
+    """Scan Cargo direct dependencies resolved in the nearest Cargo.lock."""
+
+    if path.name != "Cargo.toml":
+        return []
+
+    try:
+        project = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+        return []
+
+    direct_names = cargo_direct_dependency_names(project)
+    if not direct_names:
+        return []
+
+    lock_path = nearest_cargo_lock(path, root)
+    resolved: dict[str, set[str]] = {}
+
+    if lock_path is not None:
+        try:
+            lock = tomllib.loads(lock_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+            lock = {}
+
+        packages = lock.get("package") if isinstance(lock, dict) else None
+        if isinstance(packages, list):
+            for package in packages:
+                if not isinstance(package, dict):
+                    continue
+                name = package.get("name")
+                version = package.get("version")
+                if (
+                    isinstance(name, str)
+                    and name in direct_names
+                    and isinstance(version, str)
+                ):
+                    resolved.setdefault(name, set()).add(version)
+
+    findings: list[PreOneRiskFinding] = []
+    for name, versions in sorted(resolved.items()):
+        if len(versions) != 1:
+            continue
+        version = next(iter(versions))
+        finding = make_pre_one_finding("cargo", name, version, relative_path)
+        if finding is not None:
+            findings.append(finding)
+
+    return findings
+
+
+def scan_bundler_pre_one(
+    path: Path,
+    relative_path: str,
+) -> list[PreOneRiskFinding]:
+    """Scan Bundler direct dependencies from Gemfile.lock."""
+
+    if path.name != "Gemfile.lock":
+        return []
+
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return []
+
+    direct_names: set[str] = set()
+    resolved: dict[str, set[str]] = {}
+    section = ""
+    in_specs = False
+
+    for line in lines:
+        if line and not line.startswith(" "):
+            section = line.strip()
+            in_specs = False
+            continue
+
+        if section == "GEM":
+            if line.strip() == "specs:":
+                in_specs = True
+                continue
+            if in_specs:
+                match = re.match(
+                    r"^ {4}([A-Za-z0-9_.-]+) \(([^)]+)\)$",
+                    line,
+                )
+                if match is not None:
+                    resolved.setdefault(match.group(1), set()).add(match.group(2))
+            continue
+
+        if section == "DEPENDENCIES":
+            match = re.match(r"^ {2}([A-Za-z0-9_.-]+)", line)
+            if match is not None:
+                direct_names.add(match.group(1))
+
+    findings: list[PreOneRiskFinding] = []
+    for name in sorted(direct_names):
+        versions = resolved.get(name, set())
+        if len(versions) != 1:
+            continue
+        version = next(iter(versions))
+        finding = make_pre_one_finding("bundler", name, version, relative_path)
+        if finding is not None:
+            findings.append(finding)
+
+    return findings
+
+
+def scan_pre_one_risks(
+    root: Path,
+    *,
+    ignore_paths: list[str] | None = None,
+    include_ignored_directories: bool = False,
+) -> list[PreOneRiskFinding]:
+    """Find exact/resolved direct dependencies currently on pre-1.0 versions."""
+
+    ignore_patterns = ignore_paths or []
+    ignored_directories = set(ALWAYS_IGNORED_DIRECTORIES)
+    if not include_ignored_directories:
+        ignored_directories.update(IGNORED_DIRECTORIES)
+
+    findings: set[PreOneRiskFinding] = set()
+
+    for directory, dir_names, file_names in os.walk(root):
+        dir_names[:] = sorted(
+            name for name in dir_names if name not in ignored_directories
+        )
+        directory_path = Path(directory)
+
+        for file_name in sorted(file_names):
+            path = directory_path / file_name
+            relative_path = path.relative_to(root).as_posix()
+
+            if any(
+                repository_path_matches(pattern, relative_path)
+                for pattern in ignore_patterns
+            ):
+                continue
+
+            if file_name.startswith("requirements") and path.suffix == ".txt":
+                findings.update(scan_python_pre_one(path, relative_path))
+            elif file_name == "pyproject.toml":
+                findings.update(scan_python_pre_one(path, relative_path))
+            elif file_name == "package.json":
+                findings.update(scan_npm_pre_one(path, relative_path))
+            elif file_name == "Cargo.toml":
+                findings.update(scan_cargo_pre_one(path, relative_path, root))
+            elif file_name == "Gemfile.lock":
+                findings.update(scan_bundler_pre_one(path, relative_path))
+
+    return sorted(findings)
+
+
+def pre_one_risk_message(finding: PreOneRiskFinding) -> str:
+    """Return an actionable pre-1.0 compatibility-risk diagnostic."""
+
+    return (
+        f"{finding.ecosystem} direct dependency {finding.dependency!r} resolves "
+        f"to pre-1.0 version {finding.version} in {finding.manifest}; a routine "
+        "semver-major guard does not protect this dependency because 0.x minor "
+        "updates can contain breaking changes."
+    )
+
+
+def apply_pre_one_risk_policy(
+    findings: list[PreOneRiskFinding],
+    mode: str,
+) -> tuple[list[str], list[str]]:
+    """Convert pre-1.0 findings into policy errors or warnings."""
+
+    if mode == "off":
+        return [], []
+    if mode not in {"warn", "fail"}:
+        raise PolicyError(
+            f"Invalid pre-1.0 risk mode {mode!r}; expected off, warn, or fail."
+        )
+
+    messages = [pre_one_risk_message(finding) for finding in findings]
+    if mode == "fail":
+        return messages, []
+    return [], messages
 
 
 def has_security_safe_major_guard(update: dict[str, Any]) -> bool:
@@ -1370,6 +1813,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--detection-ignore-paths", default="")
     parser.add_argument("--detection-overrides", default="")
     parser.add_argument("--include-ignored-directories", default="false")
+    parser.add_argument(
+        "--pre-one-risk",
+        choices=("off", "warn", "fail"),
+        default="off",
+    )
     return parser
 
 
@@ -1388,6 +1836,15 @@ def main() -> int:
             config_path = root / config_path
 
         should_detect = parse_bool(args.detect_ecosystems)
+        detection_ignore_paths = parse_detection_patterns(
+            args.detection_ignore_paths
+        )
+        detection_overrides = parse_detection_overrides(
+            args.detection_overrides
+        )
+        include_ignored_directories = parse_bool(
+            args.include_ignored_directories
+        )
         excluded_manifests: list[str] = []
         overridden_manifests: list[str] = []
 
@@ -1395,15 +1852,9 @@ def main() -> int:
             detected, excluded_manifests, overridden_manifests = (
                 detect_ecosystems_with_report(
                     root,
-                    ignore_paths=parse_detection_patterns(
-                        args.detection_ignore_paths
-                    ),
-                    overrides=parse_detection_overrides(
-                        args.detection_overrides
-                    ),
-                    include_ignored_directories=parse_bool(
-                        args.include_ignored_directories
-                    ),
+                    ignore_paths=detection_ignore_paths,
+                    overrides=detection_overrides,
+                    include_ignored_directories=include_ignored_directories,
                 )
             )
         else:
@@ -1420,6 +1871,18 @@ def main() -> int:
             current_branch=current_checkout_branch(),
             default_branch=repository_default_branch(),
         )
+
+        pre_one_findings = scan_pre_one_risks(
+            root,
+            ignore_paths=detection_ignore_paths,
+            include_ignored_directories=include_ignored_directories,
+        )
+        pre_one_errors, pre_one_warnings = apply_pre_one_risk_policy(
+            pre_one_findings,
+            args.pre_one_risk,
+        )
+        errors.extend(pre_one_errors)
+        warnings.extend(pre_one_warnings)
     except PolicyError as exc:
         annotate("error", str(exc))
         return 2
@@ -1436,6 +1899,15 @@ def main() -> int:
     set_output("detection-overridden-count", str(len(overridden_manifests)))
     set_output("excluded-manifests", ",".join(excluded_manifests))
     set_output("overridden-manifests", ",".join(overridden_manifests))
+    set_output("pre-one-risk-count", str(len(pre_one_findings)))
+    set_output(
+        "pre-one-risk-findings",
+        ",".join(
+            f"{finding.ecosystem}:{finding.dependency}@{finding.version}:"
+            f"{finding.manifest}"
+            for finding in pre_one_findings
+        ),
+    )
 
     if excluded_manifests:
         print(
