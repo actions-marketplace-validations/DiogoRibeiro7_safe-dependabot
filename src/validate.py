@@ -179,7 +179,14 @@ def repository_root() -> Path:
 def current_checkout_branch() -> str | None:
     """Return the branch whose manifests are present in the checkout."""
 
-    return os.getenv("GITHUB_BASE_REF") or os.getenv("GITHUB_REF_NAME") or None
+    base_ref = os.getenv("GITHUB_BASE_REF")
+    if base_ref:
+        return base_ref
+
+    if os.getenv("GITHUB_REF_TYPE") == "tag":
+        return None
+
+    return os.getenv("GITHUB_REF_NAME") or None
 
 
 def repository_default_branch() -> str | None:

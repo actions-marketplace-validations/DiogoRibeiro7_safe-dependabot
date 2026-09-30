@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from types import ModuleType
@@ -18,6 +19,7 @@ def load_validator() -> ModuleType:
         raise RuntimeError("Could not load validator module.")
 
     module = module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -384,6 +386,30 @@ def test_pre_one_scan_respects_detector_ignore_paths(tmp_path: Path) -> None:
     )
 
     assert findings == []
+
+
+def test_current_checkout_branch_ignores_release_tags(
+    monkeypatch: Any,
+) -> None:
+    """Release tags should not be interpreted as Dependabot target branches."""
+
+    monkeypatch.delenv("GITHUB_BASE_REF", raising=False)
+    monkeypatch.setenv("GITHUB_REF_TYPE", "tag")
+    monkeypatch.setenv("GITHUB_REF_NAME", "v1.1.0")
+
+    assert validator.current_checkout_branch() is None
+
+
+def test_current_checkout_branch_keeps_branch_refs(
+    monkeypatch: Any,
+) -> None:
+    """Ordinary branch refs should still scope directory coverage."""
+
+    monkeypatch.delenv("GITHUB_BASE_REF", raising=False)
+    monkeypatch.setenv("GITHUB_REF_TYPE", "branch")
+    monkeypatch.setenv("GITHUB_REF_NAME", "main")
+
+    assert validator.current_checkout_branch() == "main"
 
 
 def test_safe_configuration_passes() -> None:
